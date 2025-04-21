@@ -2,19 +2,21 @@ package org.example;
 
 import java.io.*;
 import java.net.*;
+import java.rmi.registry.LocateRegistry;
+import java.rmi.registry.Registry;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.*;
-import java.util.regex.*;
-import org.example.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 public class smtpserverfinal {
 
     private static final int PORT = 25;
     private static final String MAIL_DIR = "mailserver/";
     private static final int THREAD_POOL_SIZE = 10;
     private static final ExecutorService threadPool = Executors.newFixedThreadPool(THREAD_POOL_SIZE);
-
     private static final String RESPONSE_220 = "220 Welcome to SMTP Server";
     private static final String RESPONSE_250 = "250 OK";
     private static final String RESPONSE_221 = "221 Bye";
@@ -100,6 +102,11 @@ public class smtpserverfinal {
                             if (command.startsWith("MAIL FROM:")) {
                                 from = extractEmail(line);
                                 if (from != null) {
+                                    // Vérification de l'authentification via RMI
+                                    if (!isAuthenticated(from)) {
+                                        out.println(RESPONSE_550 + " User not authenticated");
+                                        continue;
+                                    }
                                     out.println(RESPONSE_250);
                                     state = "MAIL_FROM_RECEIVED";
                                 } else {
@@ -175,45 +182,52 @@ public class smtpserverfinal {
                 }
             }
         }
-    }
 
-    private static boolean userExists(String email) {
-        return email != null && new File(MAIL_DIR + email.split("@")[0]).exists();
-    }
-
-    private static String extractEmail(String line) {
-        Pattern pattern = Pattern.compile("(?i)(?:MAIL FROM:|RCPT TO:)\s*<?([^<>\s]+@[^<>\s]+)>?");
-        Matcher matcher = pattern.matcher(line);
-        return matcher.find() ? matcher.group(1).trim() : null;
-    }
-
-    private static boolean isValidEmail(String email) {
-        return email != null && email.matches("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$");
-    }
-    private static void saveEmail(String from, String recipient, String content) {
-        fileLock.lock();
-        try {
-            String recipientDir = MAIL_DIR + recipient.split("@")[0];
-            File dir = new File(recipientDir);
-            if (!dir.exists()) {
-                dir.mkdirs();
+        private boolean isAuthenticated(String username) {
+            try {
+                Registry registry = LocateRegistry.getRegistry("localhost", 1099);
+                authservice authService = (authservice) registry.lookup("AuthService");
+                return authService.isAuthenticated(username); // Vérification de l'authentification via RMI
+            } catch (Exception e) {
+                e.printStackTrace();
+                return false;
             }
+        }
 
-            String filename = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date()) + ".eml";
-            File emailFile = new File(dir, filename);
+        private static String extractEmail(String line) {
+            Pattern pattern = Pattern.compile("(?i)(?:MAIL FROM:|RCPT TO:)\s*<?([^<>\s]+@[^<>\s]+)>?");
+            Matcher matcher = pattern.matcher(line);
+            return matcher.find() ? matcher.group(1).trim() : null;
+        }
 
-            try (BufferedWriter writer = new BufferedWriter(new FileWriter(emailFile))) {
-                writer.write("From: " + from + "\n");
-                writer.write("To: " + recipient + "\n");
-                writer.write("Date: " + new Date() + "\n");
-                writer.write("Subject: (no subject)\n\n");
-                writer.write(content);
+        private static boolean isValidEmail(String email) {
+            return email != null && email.matches("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$");
+        }
+
+        private static void saveEmail(String from, String recipient, String content) {
+            fileLock.lock();
+            try {
+                String recipientDir = MAIL_DIR + recipient.split("@")[0];
+                File dir = new File(recipientDir);
+                if (!dir.exists()) {
+                    dir.mkdirs();
+                }
+
+                String filename = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date()) + ".eml";
+                File emailFile = new File(dir, filename);
+
+                try (BufferedWriter writer = new BufferedWriter(new FileWriter(emailFile))) {
+                    writer.write("From: " + from + "\n");
+                    writer.write("To: " + recipient + "\n");
+                    writer.write("Date: " + new Date() + "\n");
+                    writer.write("Subject: (no subject)\n\n");
+                    writer.write(content);
+                }
+            } catch (IOException e) {
+                System.err.println("Error saving email: " + e.getMessage());
+            } finally {
+                fileLock.unlock();
             }
-        } catch (IOException e) {
-            System.err.println("Error saving email: " + e.getMessage());
-        } finally {
-            fileLock.unlock();
         }
     }
-
 }
