@@ -63,10 +63,7 @@ public class AuthServiceImpl extends UnicastRemoteObject implements authservice 
         return false;
     }
 
-    @Override
-    public boolean isAuthenticated(String username) throws RemoteException {
-        return authenticatedUsers.contains(username);
-    }
+
 
     @Override
     public synchronized boolean updateAccount(String username, String newPassword) throws RemoteException {
@@ -109,6 +106,11 @@ public class AuthServiceImpl extends UnicastRemoteObject implements authservice 
             return new JSONArray();
         }
     }
+    @Override
+    public boolean isAuthenticated(String username) throws RemoteException {
+        return authenticatedUsers.contains(username);
+    }
+
 
     private void writeAccounts(JSONArray accounts) {
         try (FileWriter writer = new FileWriter(FILE_PATH)) {

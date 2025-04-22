@@ -26,7 +26,7 @@ public class smtpserverfinal {
     private static final String RESPONSE_500 = "500 Syntax error, command unrecognized";
 
     private static final Set<String> VALID_COMMANDS = new HashSet<>(Arrays.asList(
-            "HELO", "EHLO", "MAIL FROM:", "RCPT TO:", "DATA", "QUIT", "NOOP", "VRFY", "RSET"
+            "HELO", "EHLO", "MAIL FROM:", "RCPT TO:", "DATA", "QUIT", "NOOP", "VRFY", "RSET", "AUTH"
     ));
 
     private static final ReentrantLock fileLock = new ReentrantLock();
@@ -62,6 +62,7 @@ public class smtpserverfinal {
                 out.println(RESPONSE_220);
 
                 String from = null;
+                String authenticatedUser = null;
                 List<String> recipients = new ArrayList<>();
                 StringBuilder data = new StringBuilder();
                 String state = "INIT";
@@ -83,6 +84,7 @@ public class smtpserverfinal {
                         from = null;
                         recipients.clear();
                         data.setLength(0);
+                        authenticatedUser = null;
                         state = "READY";
                         out.println(RESPONSE_250 + " (reset)");
                         continue;
@@ -99,18 +101,33 @@ public class smtpserverfinal {
                             break;
 
                         case "READY":
+                            if (command.startsWith("AUTH")) {
+                                String[] parts = line.split("\\s+");
+                                if (parts.length == 2) {
+                                    String user = parts[1];
+                                    if (isAuthenticated(user)) {
+                                        authenticatedUser = user;
+                                        out.println(RESPONSE_250 + " Authenticated as " + user);
+                                        state = "AUTHENTICATED";
+                                    } else {
+                                        out.println(RESPONSE_550 + " Authentication failed");
+                                    }
+                                } else {
+                                    out.println(RESPONSE_500 + " Usage: AUTH <username>");
+                                }
+                            } else {
+                                out.println(RESPONSE_503);
+                            }
+                            break;
+
+                        case "AUTHENTICATED":
                             if (command.startsWith("MAIL FROM:")) {
                                 from = extractEmail(line);
-                                if (from != null) {
-                                    // Vérification de l'authentification via RMI
-                                    if (!isAuthenticated(from)) {
-                                        out.println(RESPONSE_550 + " User not authenticated");
-                                        continue;
-                                    }
+                                if (from != null && from.equalsIgnoreCase(authenticatedUser)) {
                                     out.println(RESPONSE_250);
                                     state = "MAIL_FROM_RECEIVED";
                                 } else {
-                                    out.println(RESPONSE_550);
+                                    out.println(RESPONSE_550 + " Sender must match authenticated user");
                                 }
                             } else {
                                 out.println(RESPONSE_503);
@@ -168,7 +185,7 @@ public class smtpserverfinal {
                             break;
 
                         default:
-                            out.println("500 Syntax error, command unrecognized");
+                            out.println(RESPONSE_500);
                             break;
                     }
                 }
@@ -187,7 +204,7 @@ public class smtpserverfinal {
             try {
                 Registry registry = LocateRegistry.getRegistry("localhost", 1099);
                 authservice authService = (authservice) registry.lookup("AuthService");
-                return authService.isAuthenticated(username); // Vérification de l'authentification via RMI
+                return authService.isAuthenticated(username);
             } catch (Exception e) {
                 e.printStackTrace();
                 return false;
@@ -195,7 +212,7 @@ public class smtpserverfinal {
         }
 
         private static String extractEmail(String line) {
-            Pattern pattern = Pattern.compile("(?i)(?:MAIL FROM:|RCPT TO:)\s*<?([^<>\s]+@[^<>\s]+)>?");
+            Pattern pattern = Pattern.compile("(?i)(?:MAIL FROM:|RCPT TO:|AUTH)\s*<?([^<>\s]+@[^<>\s]+)>?");
             Matcher matcher = pattern.matcher(line);
             return matcher.find() ? matcher.group(1).trim() : null;
         }
