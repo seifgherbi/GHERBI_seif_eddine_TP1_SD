@@ -2,19 +2,15 @@ package org.example;
 
 import java.io.*;
 import java.net.*;
-import java.rmi.registry.LocateRegistry;
-import java.rmi.registry.Registry;
-import java.text.SimpleDateFormat;
+import java.sql.SQLException;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.locks.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class smtpserverfinal {
 
     private static final int PORT = 25;
-    private static final String MAIL_DIR = "mailserver/";
     private static final int THREAD_POOL_SIZE = 10;
     private static final ExecutorService threadPool = Executors.newFixedThreadPool(THREAD_POOL_SIZE);
     private static final String RESPONSE_220 = "220 Welcome to SMTP Server";
@@ -26,10 +22,8 @@ public class smtpserverfinal {
     private static final String RESPONSE_500 = "500 Syntax error, command unrecognized";
 
     private static final Set<String> VALID_COMMANDS = new HashSet<>(Arrays.asList(
-            "HELO", "EHLO", "MAIL FROM:", "RCPT TO:", "DATA", "QUIT", "NOOP", "VRFY", "RSET", "AUTH"
+            "HE BMS", "EHLO", "MAIL FROM:", "RCPT TO:", "DATA", "QUIT", "NOOP", "VRFY", "RSET", "AUTH"
     ));
-
-    private static final ReentrantLock fileLock = new ReentrantLock();
 
     public static void main(String[] args) {
         try (ServerSocket serverSocket = new ServerSocket(PORT)) {
@@ -65,6 +59,7 @@ public class smtpserverfinal {
                 String authenticatedUser = null;
                 List<String> recipients = new ArrayList<>();
                 StringBuilder data = new StringBuilder();
+                String subject = "(no subject)";
                 String state = "INIT";
 
                 String line;
@@ -84,6 +79,7 @@ public class smtpserverfinal {
                         from = null;
                         recipients.clear();
                         data.setLength(0);
+                        subject = "(no subject)";
                         authenticatedUser = null;
                         state = "READY";
                         out.println(RESPONSE_250 + " (reset)");
@@ -105,12 +101,17 @@ public class smtpserverfinal {
                                 String[] parts = line.split("\\s+");
                                 if (parts.length == 2) {
                                     String user = parts[1];
-                                    if (isAuthenticated(user)) {
-                                        authenticatedUser = user;
-                                        out.println(RESPONSE_250 + " Authenticated as " + user);
-                                        state = "AUTHENTICATED";
-                                    } else {
-                                        out.println(RESPONSE_550 + " Authentication failed");
+                                    try {
+                                        if (DatabaseUtils.authenticateUser(user, user)) { // Mot de passe = username pour simplifier
+                                            authenticatedUser = user;
+                                            out.println(RESPONSE_250 + " Authenticated as " + user);
+                                            state = "AUTHENTICATED";
+                                        } else {
+                                            out.println(RESPONSE_550 + " Authentication failed");
+                                        }
+                                    } catch (SQLException e) {
+                                        out.println(RESPONSE_550 + " Database error");
+                                        e.printStackTrace();
                                     }
                                 } else {
                                     out.println(RESPONSE_500 + " Usage: AUTH <username>");
@@ -172,12 +173,22 @@ public class smtpserverfinal {
 
                         case "DATA_RECEIVED":
                             if (line.equals(".")) {
+                                String emailContent = data.toString();
+                                subject = extractSubject(emailContent);
+                                String body = emailContent; // Simplification : tout le contenu est considéré comme le corps
                                 for (String recipient : recipients) {
-                                    saveEmail(from, recipient, data.toString());
+                                    try {
+                                        DatabaseUtils.storeEmail(from, recipient, subject, body);
+                                    } catch (SQLException e) {
+                                        out.println(RESPONSE_550 + " Database error");
+                                        e.printStackTrace();
+                                        return;
+                                    }
                                 }
                                 out.println(RESPONSE_250);
                                 recipients.clear();
                                 data.setLength(0);
+                                subject = "(no subject)";
                                 state = "READY";
                             } else {
                                 data.append(line).append("\n");
@@ -200,17 +211,6 @@ public class smtpserverfinal {
             }
         }
 
-        private boolean isAuthenticated(String username) {
-            try {
-                Registry registry = LocateRegistry.getRegistry("localhost", 1099);
-                authservice authService = (authservice) registry.lookup("AuthService");
-                return authService.isAuthenticated(username);
-            } catch (Exception e) {
-                e.printStackTrace();
-                return false;
-            }
-        }
-
         private static String extractEmail(String line) {
             Pattern pattern = Pattern.compile("(?i)(?:MAIL FROM:|RCPT TO:|AUTH)\s*<?([^<>\s]+@[^<>\s]+)>?");
             Matcher matcher = pattern.matcher(line);
@@ -221,30 +221,10 @@ public class smtpserverfinal {
             return email != null && email.matches("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$");
         }
 
-        private static void saveEmail(String from, String recipient, String content) {
-            fileLock.lock();
-            try {
-                String recipientDir = MAIL_DIR + recipient.split("@")[0];
-                File dir = new File(recipientDir);
-                if (!dir.exists()) {
-                    dir.mkdirs();
-                }
-
-                String filename = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date()) + ".eml";
-                File emailFile = new File(dir, filename);
-
-                try (BufferedWriter writer = new BufferedWriter(new FileWriter(emailFile))) {
-                    writer.write("From: " + from + "\n");
-                    writer.write("To: " + recipient + "\n");
-                    writer.write("Date: " + new Date() + "\n");
-                    writer.write("Subject: (no subject)\n\n");
-                    writer.write(content);
-                }
-            } catch (IOException e) {
-                System.err.println("Error saving email: " + e.getMessage());
-            } finally {
-                fileLock.unlock();
-            }
+        private static String extractSubject(String content) {
+            Pattern pattern = Pattern.compile("(?i)^Subject:\\s*(.+)$", Pattern.MULTILINE);
+            Matcher matcher = pattern.matcher(content);
+            return matcher.find() ? matcher.group(1).trim() : "(no subject)";
         }
     }
 }

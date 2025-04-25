@@ -2,18 +2,14 @@ package org.example;
 
 import java.io.*;
 import java.net.*;
-import java.rmi.registry.LocateRegistry;
-import java.rmi.registry.Registry;
+import java.sql.*;
 import java.util.concurrent.*;
-import java.util.concurrent.locks.ReentrantLock;
 
 public class popserveurfinal {
 
     private static final int PORT = 110;
-    private static final String MAIL_DIR = "mailserver/";
     private static final int THREAD_POOL_SIZE = 10;
     private static final ExecutorService threadPool = Executors.newFixedThreadPool(THREAD_POOL_SIZE);
-    private static final ReentrantLock fileLock = new ReentrantLock();
 
     public static void main(String[] args) {
         try (ServerSocket serverSocket = new ServerSocket(PORT)) {
@@ -66,12 +62,17 @@ public class popserveurfinal {
                             out.println("-ERR USER command required before PASS");
                         } else {
                             String password = line.substring(5).trim();
-                            if (checkUser(username, password)) {
-                                out.println("+OK Authentication successful");
-                                authenticated = true;
-                            } else {
-                                out.println("-ERR Authentication failed");
-                                username = null;
+                            try {
+                                if (DatabaseUtils.authenticateUser(username, password)) {
+                                    out.println("+OK Authentication successful");
+                                    authenticated = true;
+                                } else {
+                                    out.println("-ERR Authentication failed");
+                                    username = null;
+                                }
+                            } catch (SQLException e) {
+                                out.println("-ERR Database error");
+                                e.printStackTrace();
                             }
                         }
 
@@ -79,12 +80,20 @@ public class popserveurfinal {
                         listEmails(out, username);
 
                     } else if (authenticated && command.startsWith("RETR")) {
-                        int index = Integer.parseInt(line.substring(5).trim());
-                        retrieveEmail(out, username, index);
+                        try {
+                            int index = Integer.parseInt(line.substring(5).trim());
+                            retrieveEmail(out, username, index);
+                        } catch (NumberFormatException | SQLException e) {
+                            out.println("-ERR Invalid message number or database error");
+                        }
 
                     } else if (authenticated && command.startsWith("DELE")) {
-                        int index = Integer.parseInt(line.substring(5).trim());
-                        deleteEmail(out, username, index);
+                        try {
+                            int index = Integer.parseInt(line.substring(5).trim());
+                            deleteEmail(out, username, index);
+                        } catch (NumberFormatException | SQLException e) {
+                            out.println("-ERR Invalid message number or database error");
+                        }
 
                     } else if (authenticated && command.startsWith("STAT")) {
                         statEmails(out, username);
@@ -111,111 +120,74 @@ public class popserveurfinal {
             }
         }
 
-        private boolean checkUser(String username, String password) {
-            try {
-                Registry registry = LocateRegistry.getRegistry("localhost", 1099);
-                authservice authService = (authservice) registry.lookup("AuthService");
-                return authService.authenticate(username, password);
-            } catch (Exception e) {
-                e.printStackTrace();
-                return false;
-            }
-        }
-
         private void listEmails(PrintWriter out, String username) {
-            fileLock.lock();
             try {
-                File userDir = new File(MAIL_DIR + username);
-                if (!userDir.exists() || !userDir.isDirectory()) {
-                    out.println("-ERR No mailbox found");
-                    return;
+                ResultSet rs = DatabaseUtils.fetchEmails(username);
+                int count = 0;
+                long totalSize = 0;
+                StringBuilder response = new StringBuilder();
+
+                while (rs.next()) {
+                    count++;
+                    int id = rs.getInt("id");
+                    String content = DatabaseUtils.getEmailContent(id).next() ? rs.getString("content") : "";
+                    int size = content != null ? content.length() : 0;
+                    totalSize += size;
+                    response.append(id).append(" ").append(size).append("\n");
                 }
 
-                File[] emails = userDir.listFiles((dir, name) -> name.endsWith(".eml"));
-                if (emails == null || emails.length == 0) {
+                if (count == 0) {
                     out.println("+OK 0 messages");
-                    return;
-                }
-
-                out.println("+OK " + emails.length + " messages:");
-                for (int i = 0; i < emails.length; i++) {
-                    out.println((i + 1) + " " + emails[i].length());
-                }
-            } finally {
-                fileLock.unlock();
-            }
-        }
-
-        private void retrieveEmail(PrintWriter out, String username, int index) {
-            fileLock.lock();
-            try {
-                File userDir = new File(MAIL_DIR + username);
-                File[] emails = userDir.listFiles((dir, name) -> name.endsWith(".eml"));
-                if (emails == null || index < 1 || index > emails.length) {
-                    out.println("-ERR No such message");
-                    return;
-                }
-
-                File emailFile = emails[index - 1];
-                out.println("+OK " + emailFile.length() + " octets");
-                try (BufferedReader reader = new BufferedReader(new FileReader(emailFile))) {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        out.println(line);
-                    }
+                } else {
+                    out.println("+OK " + count + " messages:");
+                    out.print(response.toString());
                     out.println(".");
                 }
-            } catch (IOException e) {
-                out.println("-ERR Error reading email");
-            } finally {
-                fileLock.unlock();
+            } catch (SQLException e) {
+                out.println("-ERR Database error");
+                e.printStackTrace();
             }
         }
 
-        private void deleteEmail(PrintWriter out, String username, int index) {
-            fileLock.lock();
-            try {
-                File userDir = new File(MAIL_DIR + username);
-                File[] emails = userDir.listFiles((dir, name) -> name.endsWith(".eml"));
-                if (emails == null || index < 1 || index > emails.length) {
-                    out.println("-ERR No such message");
-                    return;
-                }
+        private void retrieveEmail(PrintWriter out, String username, int mailId) throws SQLException {
+            ResultSet rs = DatabaseUtils.getEmailContent(mailId);
+            if (rs.next() && rs.getString("recipient").equalsIgnoreCase(username)) {
+                String content = rs.getString("content");
+                int size = content != null ? content.length() : 0;
+                out.println("+OK " + size + " octets");
+                out.println(content);
+                out.println(".");
+            } else {
+                out.println("-ERR No such message or unauthorized");
+            }
+        }
 
-                File emailFile = emails[index - 1];
-                if (emailFile.delete()) {
-                    out.println("+OK Message deleted");
-                } else {
-                    out.println("-ERR Unable to delete message");
-                }
-            } finally {
-                fileLock.unlock();
+        private void deleteEmail(PrintWriter out, String username, int mailId) throws SQLException {
+            ResultSet rs = DatabaseUtils.getEmailContent(mailId);
+            if (rs.next() && rs.getString("recipient").equalsIgnoreCase(username)) {
+                DatabaseUtils.deleteEmail(mailId);
+                out.println("+OK Message deleted");
+            } else {
+                out.println("-ERR No such message or unauthorized");
             }
         }
 
         private void statEmails(PrintWriter out, String username) {
-            fileLock.lock();
             try {
-                File userDir = new File(MAIL_DIR + username);
-                if (!userDir.exists() || !userDir.isDirectory()) {
-                    out.println("-ERR No mailbox found");
-                    return;
+                ResultSet rs = DatabaseUtils.fetchEmails(username);
+                int count = 0;
+                long totalSize = 0;
+
+                while (rs.next()) {
+                    count++;
+                    String content = DatabaseUtils.getEmailContent(rs.getInt("id")).next() ? rs.getString("content") : "";
+                    totalSize += content != null ? content.length() : 0;
                 }
 
-                File[] emails = userDir.listFiles((dir, name) -> name.endsWith(".eml"));
-                if (emails == null || emails.length == 0) {
-                    out.println("+OK 0 0");
-                    return;
-                }
-
-                int totalSize = 0;
-                for (File email : emails) {
-                    totalSize += email.length();
-                }
-
-                out.println("+OK " + emails.length + " " + totalSize);
-            } finally {
-                fileLock.unlock();
+                out.println("+OK " + count + " " + totalSize);
+            } catch (SQLException e) {
+                out.println("-ERR Database error");
+                e.printStackTrace();
             }
         }
     }
